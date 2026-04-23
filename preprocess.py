@@ -1,32 +1,26 @@
-# preprocess.py
-# This script loads, preprocesses, and verifies your dataset
-# It does NOT save images — TensorFlow handles augmentation during training
-
 import tensorflow as tf
 import matplotlib.pyplot as plt
 import numpy as np
 import os
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-DATASET_PATH = "dataset"
-IMG_SIZE     = (224, 224)   # MobileNetV2 standard input size
-BATCH_SIZE   = 16           # How many images to process at once
-                            # Keep small (16-32) since our dataset is small
-SEED         = 42           # For reproducibility
+script_dir   = os.path.dirname(os.path.abspath(__file__))
+DATASET_PATH = os.path.join(script_dir, "dataset")
+IMG_SIZE     = (224, 224)
+BATCH_SIZE   = 16
+SEED         = 42
 
-# ─── Step 1: Load Dataset & Split into Train / Validation ─────────────────────
-# 80% images used for training, 20% for validation (checking model during training)
-
+# ─── Load Dataset ─────────────────────────────────────────────────────────────
 print("Loading dataset...")
 
 train_ds = tf.keras.utils.image_dataset_from_directory(
     DATASET_PATH,
-    validation_split = 0.2,        # 20% goes to validation
+    validation_split = 0.2,
     subset           = "training",
     seed             = SEED,
-    image_size       = IMG_SIZE,   # Resize all images to 224x224
+    image_size       = IMG_SIZE,
     batch_size       = BATCH_SIZE,
-    label_mode       = "categorical" # Returns one-hot labels [1,0,0], [0,1,0], [0,0,1]
+    label_mode       = "categorical"
 )
 
 val_ds = tf.keras.utils.image_dataset_from_directory(
@@ -39,59 +33,53 @@ val_ds = tf.keras.utils.image_dataset_from_directory(
     label_mode       = "categorical"
 )
 
-# ─── Step 2: Check Class Names ─────────────────────────────────────────────────
 class_names = train_ds.class_names
-print(f"\nClasses detected: {class_names}")
-print(f"Expected        : ['high', 'low', 'medium']")
-# TensorFlow reads folder names alphabetically
+print(f"Classes detected: {class_names}")
 
-# ─── Step 3: Normalization ─────────────────────────────────────────────────────
-# Pixel values are 0-255. We divide by 255 to get 0-1.
-# This helps the model train faster and more stably.
+# ─── Augmentation (BEFORE normalization, on 0-255 range) ──────────────────────
+data_augmentation = tf.keras.Sequential([
+    tf.keras.layers.RandomFlip("horizontal"),
+    tf.keras.layers.RandomRotation(0.1),
+    tf.keras.layers.RandomZoom(0.1),
+], name="data_augmentation")
+# NOTE: Removed RandomBrightness & RandomContrast here
+# They will be added INSIDE the model safely in Step 4
 
+# ─── Normalization (AFTER augmentation, converts 0-255 → 0-1) ─────────────────
 normalization_layer = tf.keras.layers.Rescaling(1.0 / 255)
 
-train_ds = train_ds.map(lambda x, y: (normalization_layer(x), y))
+train_ds = train_ds.map(lambda x, y: (normalization_layer(data_augmentation(x, training=True)), y))
 val_ds   = val_ds.map(lambda x, y: (normalization_layer(x), y))
 
-# ─── Step 4: Augmentation (applied only on training data) ─────────────────────
-# Validation data is NEVER augmented — we want real performance metrics
-
-data_augmentation = tf.keras.Sequential([
-    tf.keras.layers.RandomFlip("horizontal"),         # Mirror image left-right
-    tf.keras.layers.RandomRotation(0.1),              # Rotate up to 10%
-    tf.keras.layers.RandomZoom(0.1),                  # Zoom in/out up to 10%
-    tf.keras.layers.RandomBrightness(0.2),            # Brightness variation ±20%
-    tf.keras.layers.RandomContrast(0.1),              # Contrast variation ±10%
-], name="data_augmentation")
-
-train_ds = train_ds.map(lambda x, y: (data_augmentation(x, training=True), y))
-
-# ─── Step 5: Performance Optimization ─────────────────────────────────────────
-# prefetch loads next batch while current one is training = faster training
-
+# ─── Performance Optimization ──────────────────────────────────────────────────
 AUTOTUNE = tf.data.AUTOTUNE
 train_ds = train_ds.prefetch(buffer_size=AUTOTUNE)
 val_ds   = val_ds.prefetch(buffer_size=AUTOTUNE)
 
-# ─── Step 6: Verify Everything is Working ─────────────────────────────────────
+# ─── Verify ───────────────────────────────────────────────────────────────────
 print("\n=== Dataset Info ===")
 for images, labels in train_ds.take(1):
-    print(f"  Image batch shape : {images.shape}")   # Should be (16, 224, 224, 3)
-    print(f"  Label batch shape : {labels.shape}")   # Should be (16, 3)
-    print(f"  Pixel value range : {images.numpy().min():.2f} to {images.numpy().max():.2f}")
-    # Should be 0.00 to 1.00 after normalization
+    print(f"  Image batch shape : {images.shape}")
+    print(f"  Label batch shape : {labels.shape}")
+    pixel_min = images.numpy().min()
+    pixel_max = images.numpy().max()
+    print(f"  Pixel value range : {pixel_min:.2f} to {pixel_max:.2f}")
+    if pixel_max <= 1.0:
+        print("  Normalization     : ✅ Correct (0 to 1)")
+    else:
+        print("  Normalization     : ❌ Still wrong!")
 
-# ─── Step 7: Visualize Sample Images ──────────────────────────────────────────
+# ─── Visualize ────────────────────────────────────────────────────────────────
 print("\nGenerating sample visualization...")
-
 plt.figure(figsize=(12, 6))
 plt.suptitle("Sample Preprocessed Images (Augmented)", fontsize=14)
 
 for images, labels in train_ds.take(1):
     for i in range(min(9, images.shape[0])):
         ax = plt.subplot(3, 3, i + 1)
-        plt.imshow(images[i].numpy())
+        # Clip to [0,1] just for display safety
+        img = np.clip(images[i].numpy(), 0.0, 1.0)
+        plt.imshow(img)
         class_index = np.argmax(labels[i])
         plt.title(class_names[class_index], fontsize=10)
         plt.axis("off")
